@@ -1,0 +1,83 @@
+#!/bin/sh
+# Start/stop/restart aacSource.
+
+PID="/var/run/aacsource.pid"
+COM_FIFO="/var/run/aacsource.fifo"
+
+# Start:
+_start() {
+  echo -n "Starting aacSource daemon:"
+  echo
+  
+  #make communication fifo
+  if [ ! -e $COM_FIFO ]
+  then
+	mkfifo $COM_FIFO
+  fi
+  if [ -p $COM_FIFO ]
+  then
+    #Run
+    /usr/local/bin/aacsource $PID $COM_FIFO -d 2>/dev/null | nc localhost 8000 > $COM_FIFO &
+    sleep 3
+    if [ -f $PID ]
+    then
+	proc_id="`cat $PID`"
+	if [ -n "`ps h -p $proc_id`" ]
+	then
+	    echo "Sucsessfull started."
+	else
+	    echo "ERROR: Unknown!"
+	fi;
+    else
+        echo "ERROR: Unknown!"
+    fi;
+  else
+      echo "ERROR:Can't create communication fifo."
+      echo "Exit."
+  fi
+
+  echo
+}
+
+# Stop:
+_stop() {
+    if [ -f $PID ]
+    then
+	echo -n "Stopping aacSource daemon..."
+	
+	proc_id="`cat $PID`"
+	
+	if [ -n "`ps h -p $proc_id`" ]
+	then
+	    kill $proc_id
+	    echo
+	    sleep 1
+	fi;
+	rm -f $PID
+    else
+	echo "ERROR: aacSource not runnig!"
+    fi;
+    
+    if [ -p $COM_FIFO ]; then rm $COM_FIFO;fi;
+}
+
+# Restart:
+_restart() {
+  _stop
+  sleep 1
+  _start
+}
+
+case "$1" in
+'start')
+  _start
+  ;;
+'stop')
+  _stop
+  ;;
+'restart')
+  _restart
+  ;;
+*)
+  echo "usage $0 start|stop|restart"
+esac

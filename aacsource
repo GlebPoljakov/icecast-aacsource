@@ -1,0 +1,185 @@
+#!/bin/sh -x
+#
+
+# -c $config
+# -o $record
+# -t $duration
+# -d $debug_level
+
+#TODO:
+#	do not block the $card+
+#	multi instances
+#		dinamic config file
+#		dinamic $fifo+
+
+# Procedure for writing debug messages
+# $1 - message, $2 - level of the message (error, warning, notify)
+msg (){
+    if [ $2 -le $debug ]; then logger -t "$log_tag" "$1"; fi;
+}
+
+#System Variables.Default values
+    config="/etc/aacsource/aacsource.conf"	#config file name
+    debug="0"					#debug level
+    aacsource_pid_file="/var/run/aacsource.pid"	#file for PID
+    log="/var/log/aacsource.log"
+    com_fifo="/var/run/aacsource.fifo"		#communication fifo
+
+    aacsource_pid="$$"
+    log_tag="AACsource v0.02 [${aacsource_pid}]"
+
+    base64ps="`echo -n "source:$password" | base64`";	#base64 encoded password
+    responseOK="HTTP/1.0 200"				#this is the right response for IceCast
+    response403="HTTP/1.0 403"
+
+#parse command line
+    while getopts f:c:d: opt; do
+	case "$opt" in
+	    c)	config="$OPTARG";;
+	    d)	debug="$OPTARG";;
+	    f)	com_fifo="$OPTARG";;
+	    \?)				#unknown
+		echo >&2 \
+		"usage: $0 [-c config] [-d debug_level] [-f communication fifo]"
+		exit 1;;
+	esac
+    done
+    shift `expr $OPTIND - 1`
+
+#System vars
+    fifo="${com_fifo}.au"				#ALSARecorder => SoX
+    fifo_norm="${com_fifo}_norm.au"			#SoX => Encoder
+
+#Check for correct variables values:
+    if [ -e "$config" ]; then
+	if [ ! -r "$config" ]; then
+	    msg "Can't read from $config!" 0
+	    exit 1;
+	fi;
+    else
+    	msg "File $config not exists!" 0
+	exit 1;
+    fi;
+
+    if [ -e "$com_fifo" ]; then
+	if [ ! -r "$com_fifo" ]; then
+	    msg "Can't read from $com_fifo!" 0
+	    exit 1;
+	fi;
+    else
+    	msg "File $config not exists!" 0
+	exit 1;
+    fi;
+
+    if [ -z "$com_fifo" ]; then
+	msg "Expected -o record_flename" 0
+	exit 1;
+    fi;
+
+#Load config file
+    . $config
+
+    echo $aacsource_pid > $aacsource_pid_file
+
+
+stop (){
+    #stop traping signals CHLD INT TERM
+    set +bm
+
+    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Get stop-signal... stoping..";fi;
+
+    #Now killing child proceses
+	if [ -n "`ps h -p $aacplusenc_pid`" ]
+	then
+	    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Kill AAC+ Encoder";fi;
+	    kill -9 $aacplusenc_pid
+	fi
+	if [ -n "`ps h -p $sox_pid`" ]
+        then
+            if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Kill SoX";fi;
+	    kill -9 $sox_pid
+	fi
+	if [ -n "`ps h -p $arecord_pid`" ]
+        then
+            if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Kill ALSA Recorder";fi;
+	    kill -9 $arecord_pid
+	fi
+    
+
+    #remove audio fifo
+	if [ -p $fifo ]; then rm $fifo; fi;
+	if [ -p $fifo_norm ]; then rm $fifo_norm; fi;
+
+    rm $aacsource_pid_file
+    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Stoped.";fi;
+
+    exit 0
+}
+
+#send Login info
+    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Trying to Login"; fi;
+    sleep 1
+    echo "SOURCE $mountpoint HTTP/1.0"
+    echo "Authorization: Basic $base64ps"
+    echo "Content-Type: audio/aacp"
+    echo "User-Agent: aacSource v0.01"
+    echo "ice-audio-info: bitrate=$bitrate;channels=2;samplerate=22050" #echo "ice-bitrate: $bitrate"
+    echo "ice-public: 1"
+    echo "ice-name: $name"
+    echo "ice-description: $description"
+    echo "ice-url: $url"
+    echo "ice-genre: $genre"
+    echo
+
+    logger -t "aacSource v0.01" "Waiting for response"
+    response="`head -c 12 $com_fifo`"
+
+    #if login info not right then exit
+    if [ "$response" != "$responseOK" ]
+    then
+	if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "IceCast server error: $response";fi;
+	#if [ "$response" == "$response403" ]
+	#then
+	#    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Retry";fi;
+	#    goto l_login
+	#fi
+	exit 1;
+    fi
+    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Login:OK";fi;
+
+#Sending audio stream
+    
+    #create audio fifo
+    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Creating FIFO:";fi;
+        if [ -e $fifo ]; then rm $fifo;fi;
+	    mkfifo $fifo;
+	    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "     Created FIFO: ${fifo}";fi;
+        if [ -e $fifo_norm ]; then rm $fifo_norm;fi;
+    	    mkfifo $fifo_norm;
+    	    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "     Created FIFO: ${fifo_norm}";fi;
+
+    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Getting audio stream from card: ${card}";fi;
+#    arecord -D $card --quiet --nonblock --file-type wav --channels=2 -f cd | sox -q -t wav - -t wav - vol 9dB > $fifo_norm &
+    arecord -D $card --quiet --nonblock --file-type wav --channels=2 -f cd > $fifo &
+    arecord_pid="$!"
+    
+    #normalizing
+    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Normalizing";fi;
+#    sox -t wav $fifo -t wav $fifo_norm vol 9dB &2 > $log &
+#    sox -q -t wav $fifo -t wav $fifo_norm vol 12dB &
+    sox -q -t raw -r 44100 -c 2 -sw $fifo -t wav $fifo_norm vol 5dB &2 >> $log &
+    sox_pid="$!"
+
+    #sending audio stream
+    if [ "$debug" = "-d" ]; then logger -t "aacSource v0.01" "Sending audio stream";fi;
+    aacplusenc $fifo_norm - $bitrate s &
+    aacplusenc_pid="$!"
+
+
+
+#Set traps on SIGCHLD SIGINT SIGTERM
+    set -bm
+    trap 'stop $aacsource_pid' EXIT HUP QUIT CHLD INT TERM
+
+    wait
+#End
